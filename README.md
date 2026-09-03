@@ -180,6 +180,112 @@ The backend is the central application layer. It will:
 
 Safety-critical functions must not depend solely on the backend, MQTT broker, network, or web dashboard.
 
+## Control Architecture
+
+The control system is divided into three levels. This ensures that closing the dashboard or losing a network connection does not immediately stop climate operation or bypass equipment protection.
+
+```mermaid
+flowchart TD
+    W["Web dashboard<br/>preferences and settings"] --> C["Climate controller<br/>supervisory control"]
+    C <-->|MQTT| A["Sensors and actuators<br/>local fallback"]
+    C --> H["Manufacturer controller<br/>equipment protection"]
+```
+
+### 1. Web dashboard
+
+The dashboard is a user interface, not a real-time controller. It allows the user to:
+
+- View measurements and system status.
+- Configure room setpoints and schedules.
+- Select manual or automatic operating modes.
+- Inspect warnings, device availability, and historical data.
+
+Closing the browser must not stop monitoring or climate control. The frontend communicates only with the backend through REST and WebSockets; it does not control actuators directly.
+
+### 2. Central climate controller
+
+The central control logic runs continuously on the same local server as the backend and MQTT broker. During early development it will be implemented as a separate module inside the FastAPI backend, for example:
+
+```text
+application/backend/app/
+├── api/
+├── mqtt/
+├── database/
+└── control/
+    ├── room_controller.py
+    ├── schedules.py
+    └── safety_limits.py
+```
+
+The controller will eventually evaluate measurements, setpoints, operating modes, schedules, and equipment state. It can then publish commands or heating requests through MQTT.
+
+For example:
+
+```text
+Measured room temperature: 19.8 °C
+Room setpoint:             20.5 °C
+Control hysteresis:         0.3 °C
+
+Result: enable room heating demand
+```
+
+If the control logic becomes sufficiently complex, it can later be moved into its own Docker service without changing the MQTT device interface or dashboard API.
+
+### 3. Local device logic
+
+Sensors and actuators remain responsible for functions that must survive a central server or network failure. Depending on the device, actuator firmware should implement:
+
+- A watchdog.
+- Validation of received commands.
+- A communication timeout.
+- A defined state after startup or reset.
+- A safe fallback state after loss of MQTT communication.
+- Maximum activation times where applicable.
+- Feedback of the actual output state.
+- Optional local or manual override.
+
+The safe fallback state is device-specific. Closing a zone valve may be safe in one part of the installation, while another part may require a permanently available flow path.
+
+### Heat-pump boundary
+
+The Stiebel Eltron WPM remains responsible for internal heat-pump functions such as:
+
+- Compressor control.
+- Defrost cycles.
+- Minimum flow protection.
+- Maximum temperature protection.
+- Electric backup heating.
+- Domestic hot-water preparation.
+- Internal fault monitoring.
+
+The custom climate controller should preferably communicate a demand, mode, or setpoint to the manufacturer controller. It must not directly operate the compressor, primary charging pump, defrost process, or internal safety devices.
+
+### Physical deployment
+
+During development, the complete central application can run in Docker Desktop on a development computer:
+
+```text
+Development computer
+└── Docker Desktop
+    ├── Mosquitto
+    ├── FastAPI and climate controller
+    ├── SQLite storage
+    └── Vue dashboard
+```
+
+For permanent use, the same Docker Compose project can be transferred to an always-on Linux mini PC on the local network:
+
+```text
+Local Linux mini PC
+└── Docker
+    ├── Mosquitto
+    ├── FastAPI and climate controller
+    ├── Persistent database
+    └── Web dashboard
+```
+
+The sensors and actuators communicate with this server over the local network. Other local devices access the dashboard through a browser. The system does not require an open browser to operate.
+
 ## Initial API
 
 The first backend version is expected to provide endpoints similar to:
@@ -258,6 +364,8 @@ mosquitto
 backend
 frontend
 ```
+
+The climate controller initially runs as a module within the backend container. A future deployment may separate it into a fourth `controller` service when independent testing, restarting, or scaling becomes useful.
 
 Persistent storage will be used for the database and MQTT broker data. Containers should remain replaceable: rebuilding or updating a container must not remove measurement history or configuration.
 
